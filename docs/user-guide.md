@@ -117,13 +117,9 @@ If something isn't working, see the [troubleshooting guide](troubleshooting.md).
 
 ## Step 6: Configure Istio
 
-The addon installs the operator and distributes trust, but you configure the mesh control plane on each cluster yourself.
+The addon installs the operator, distributes trust, and handles endpoint discovery (remote secrets), but you configure the mesh control plane on each cluster yourself.
 Both OSSM 3.x and upstream Sail use the `sailoperator.io` API group.
 See the [Sail operator multicluster docs][sail-multicluster] for the full procedure.
-
-> **Note:** Automated remote secret distribution is not yet implemented.
-> For now, follow the [manual remote secret exchange][sail-multicluster] procedure from the Sail docs.
-> This step will be removed once the addon handles it automatically.
 
 To get started quickly, use the provided sample manifests from [samples/istio/](../samples/istio/).
 
@@ -158,7 +154,7 @@ done
 
 ## Step 7: Cleanup
 
-Deleting the `MultiClusterMesh` CR removes all addon-managed resources: operator ManifestWorks (if no other mesh needs the operator on that cluster), CA certificate secrets, and ManagedServiceAccounts.
+Deleting the `MultiClusterMesh` CR removes all addon-managed resources: operator ManifestWorks (if no other mesh needs the operator on that cluster), CA certificate secrets, ManagedServiceAccounts, istio-reader RBAC, and remote secrets.
 
 > **Warning:** Deleting a mesh also deletes the control plane namespace on each spoke cluster, including any Istio resources you deployed there.
 > Back up your Istio configuration before deleting.

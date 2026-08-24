@@ -11,8 +11,7 @@ The addon manages the "plumbing" (trust and connectivity) while you configure th
 
 - **Operator Lifecycle**: Installs the service mesh operator on managed clusters via OLM
 - **Trust Distribution**: Mints per-cluster intermediate CAs from a shared root using [cert-manager], implementing Istio's [Plug-in CA] pattern for mTLS trust
-- **Endpoint Discovery** *(in progress)*: Creates [ManagedServiceAccount] resources for each cluster.
-  Remote secret distribution is not yet implemented.
+- **Endpoint Discovery**: Exchanges discovery credentials via [ManagedServiceAccount] with appropriate RBAC to each service account, and distributes remote secrets to all peer clusters
 
 ```mermaid
 flowchart TD

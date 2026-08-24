@@ -1,7 +1,7 @@
 # Design
 
 > This document describes the **target design**, not the current implementation.
-> Some sections (ManagedClusterView-based detection, remote secret distribution) are not yet implemented.
+> Some sections (ManagedClusterView-based detection) are not yet implemented.
 > See the [Phased Approach](#phased-approach) section for implementation status.
 
 ## Table of Contents
@@ -53,6 +53,8 @@ flowchart TD
         (MSA token, per cluster)"])
         addon --> mw_operator(["ManifestWork
         (operator)"])
+        addon --> mw_reader(["ManifestWork
+        (istio-reader RBAC, per mesh)"])
         casecret --> mw_cacerts(["ManifestWork
         (cacerts)"])
         tokensecret --> mw_remote(["ManifestWork
@@ -64,11 +66,14 @@ flowchart TD
         (sail / OSSM operator)"])
         agent --> cacerts(["Secret
         (cacerts)"])
+        agent --> reader_rbac(["ClusterRole + ClusterRoleBinding
+        (istio-reader)"])
         agent --> remotesecret(["Secret
         (remote secret, per peer)"])
     end
 
     mw_operator --> agent
+    mw_reader --> agent
     mw_cacerts --> agent
     mw_remote --> agent
 
@@ -95,7 +100,7 @@ flowchart TD
 
     %% OCM managed (orange)
     classDef ocm fill:#ffedd5,stroke:#f97316,color:#7c2d12
-    class agent,msa,mw_operator,mw_cacerts,mw_remote ocm
+    class agent,msa,mw_operator,mw_reader,mw_cacerts,mw_remote ocm
 
 ```
 

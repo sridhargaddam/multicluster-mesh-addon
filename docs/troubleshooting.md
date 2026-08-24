@@ -19,7 +19,7 @@ clusteradm get clustersets
 
 ## Inspecting Addon Resources
 
-ManifestWorks created by the addon (operator, cacerts, control plane namespace):
+ManifestWorks created by the addon (operator, cacerts, control plane namespace, istio-reader RBAC):
 
 ```bash
 kubectl get manifestwork -A -l app.kubernetes.io/managed-by=multicluster-mesh-addon
@@ -36,6 +36,18 @@ Certificates and secrets:
 ```bash
 kubectl get certificate -n <mesh-namespace>
 kubectl get secret -n <mesh-namespace> -l mesh.open-cluster-management.io/mesh-name=<mesh-name>
+```
+
+ManagedServiceAccounts (endpoint discovery credentials):
+
+```bash
+kubectl get managedserviceaccount -A -l mesh.open-cluster-management.io/mesh-name=<mesh-name>
+```
+
+ManifestWorkReplicaSet (remote secret distribution):
+
+```bash
+kubectl get manifestworkreplicaset -n <mesh-namespace> <mesh-name> -o yaml
 ```
 
 Controller logs:
@@ -115,6 +127,28 @@ Either:
 
 Use a different control plane or operator namespace to resolve.
 
+### No remote secrets on spoke clusters
+
+The addon creates ManagedServiceAccounts to obtain tokens, grants istio-reader RBAC via ManifestWork, and distributes remote secrets to peer clusters via ManifestWorkReplicaSet.
+
+Check each step:
+
+```bash
+# ManagedServiceAccount created?
+kubectl get managedserviceaccount -A -l mesh.open-cluster-management.io/mesh-name=<mesh-name>
+
+# Token secret synced back?
+kubectl get managedserviceaccount -n <cluster-name> -o jsonpath='{.items[*].status.tokenSecretRef}'
+
+# ManifestWorkReplicaSet created for remote secrets?
+kubectl get manifestworkreplicaset -n <mesh-namespace> <mesh-name> -o yaml
+```
+
+Common causes:
+- [ManagedServiceAccount][msa-addon] addon not installed on the hub.
+  The token secret won't appear until the MSA controller processes the request.
+- The `ManifestWorkReplicaSet` feature gate is not enabled on the hub's `ClusterManager`.
+
 ### Cross-cluster traffic not working
 
 This can be an addon issue or an Istio configuration issue.
@@ -149,3 +183,4 @@ Reapply the Istio CR and east-west gateway with the matching `NETWORK` value.
 <!-- Reference links -->
 [istio-mc-troubleshoot]: https://istio.io/latest/docs/ops/diagnostic-tools/multicluster/
 [kind]: https://kind.sigs.k8s.io/
+[msa-addon]: https://open-cluster-management.io/docs/getting-started/integration/managed-serviceaccount/

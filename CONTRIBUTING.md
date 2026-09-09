@@ -95,6 +95,8 @@ See [Developer Certificate of Origin (DCO)][DCO].
    make verify && make test && make test-integration
    make dev-env && make test-e2e && make dev-clean # optional
    ```
+   `make verify` fetches upstream Istio templates to check for any drift in istio-reader RBAC.
+   It requires network access, but you can skip that check with `ISTIO_READER_SKIP=1`.
 6. **Commit with sign-off**
    ```bash
    git commit -s -m "Your commit message"

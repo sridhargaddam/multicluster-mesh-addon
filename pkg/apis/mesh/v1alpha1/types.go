@@ -13,6 +13,11 @@ import (
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:subresource:status
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must not exceed 63 characters"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
+// +kubebuilder:printcolumn:name="ClusterSet",type="string",JSONPath=`.spec.clusterSet`
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:printcolumn:name="Message",type="string",priority=1,JSONPath=`.status.conditions[?(@.type=="Ready")].message`
 
 // MultiClusterMesh represents a multi-cluster service mesh configuration
 type MultiClusterMesh struct {
@@ -82,7 +87,7 @@ type MultiClusterMeshSpec struct {
 	// +optional
 	ControlPlane ControlPlaneConfig `json:"controlPlane,omitempty"`
 
-	// Operator defines the Sail Operator installation configuration
+	// Operator defines the service mesh operator installation configuration
 	// +optional
 	Operator OperatorConfig `json:"operator,omitempty"`
 
@@ -93,17 +98,31 @@ type MultiClusterMeshSpec struct {
 
 // ControlPlaneConfig defines where the mesh control plane will be installed
 type ControlPlaneConfig struct {
-	// Namespace is the namespace where Istio will be installed on each cluster
+	// Namespace is the namespace where Istio will be installed on each cluster.
+	// This namespace is created and deleted by the addon as part of the mesh lifecycle.
 	// +optional
 	// +kubebuilder:default="istio-system"
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.controlPlane.namespace is immutable"
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// OperatorConfig defines the Sail Operator installation settings
+// OperatorConfig defines the service mesh operator installation settings.
+// Defaults target OSSM on OpenShift. Override fields to use a different operator variant (e.g. Sail).
 type OperatorConfig struct {
-	// Namespace is the namespace where the Sail Operator will be installed
-	// Defaults to "openshift-operators" on OpenShift, "sail-operator" on vanilla Kubernetes
+	// Name is the OLM package name of the operator
 	// +optional
+	// +kubebuilder:default="servicemeshoperator3"
+	Name string `json:"name,omitempty"`
+
+	// Namespace is the namespace where the operator will be installed.
+	// This namespace may be deleted when the mesh is removed, so avoid
+	// using a namespace that contains other resources.
+	// +optional
+	// +kubebuilder:default="multicluster-mesh-operator"
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('openshift-')",message="namespace must not use the reserved 'openshift-' prefix"
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('kube-')",message="namespace must not use the reserved 'kube-' prefix"
+	// +kubebuilder:validation:XValidation:rule="self != 'default'",message="namespace must not be 'default'"
 	Namespace string `json:"namespace,omitempty"`
 
 	// Channel is the OLM subscription channel (e.g., "stable", "1.23")
@@ -112,13 +131,13 @@ type OperatorConfig struct {
 	Channel string `json:"channel,omitempty"`
 
 	// Source is the CatalogSource name
-	// Defaults to "redhat-operators" on OpenShift, "operatorhubio-catalog" on vanilla Kubernetes
 	// +optional
+	// +kubebuilder:default="redhat-operators"
 	Source string `json:"source,omitempty"`
 
 	// SourceNamespace is the namespace of the CatalogSource
-	// Defaults to "openshift-marketplace" on OpenShift, "olm" on vanilla Kubernetes
 	// +optional
+	// +kubebuilder:default="openshift-marketplace"
 	SourceNamespace string `json:"sourceNamespace,omitempty"`
 
 	// StartingCSV is the specific operator version to install
@@ -199,9 +218,6 @@ const (
 
 	// ReasonOperatorInstalled indicates the operator CSV has been successfully installed
 	ReasonOperatorInstalled = "Installed"
-
-	// ReasonMissingProductClaim indicates the cluster is missing its product claim
-	ReasonMissingProductClaim = "MissingProductClaim"
 
 	// ReasonReconcileError indicates an error occurred during reconciliation
 	ReasonReconcileError = "ReconcileError"

@@ -12,7 +12,8 @@ spec:
 
   # Operator configuration with version pinning and manual approval
   operator:
-    namespace: sail-operator
+    name: sailoperator
+    namespace: multicluster-mesh-operator
     channel: stable
     source: operatorhubio-catalog
     sourceNamespace: olm

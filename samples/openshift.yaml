@@ -5,16 +5,16 @@ metadata:
 spec:
   # Reference to the ManagedClusterSet that defines which clusters participate in the mesh
   # NOTE: Update this to match your ManagedClusterSet name
-  clusterSet: default
+  clusterSet: mesh-cluster-set
 
   # Control plane configuration
   controlPlane:
     namespace: istio-system
 
-  # OpenShift-specific operator configuration
+  # OSSM operator configuration (these values match the kubebuilder defaults)
   operator:
-    # On OpenShift, the operator is typically installed in openshift-operators
-    namespace: openshift-operators
+    # Dedicated namespace for the operator (default: multicluster-mesh-operator)
+    namespace: multicluster-mesh-operator
 
     # Use Red Hat's operator catalog
     channel: stable

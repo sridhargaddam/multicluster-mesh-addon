@@ -4,6 +4,10 @@ package e2e
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"reflect"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,9 +16,11 @@ import (
 	operatorsv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	workv1 "open-cluster-management.io/api/work/v1"
+	addonv1beta1 "open-cluster-management.io/api/addon/v1beta1"
+	msav1beta1 "open-cluster-management.io/managed-serviceaccount/apis/authentication/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	meshv1alpha1 "github.com/stolostron/multicluster-mesh-addon/pkg/apis/mesh/v1alpha1"
@@ -24,11 +30,37 @@ import (
 )
 
 const (
-	controllerNamespace = "multicluster-mesh-system"
-	controllerName      = "multicluster-mesh-controller"
+	controllerName     = "multicluster-mesh-controller"
+	testDefaultChannel = "stable"
+
+	msaSpokeNamespace = "open-cluster-management-agent-addon"
+
+	testIssuerName       = "mesh-test-root-ca"
+	testIssuerKind       = "ClusterIssuer"
+	testIssuerSecretName = "mesh-test-root-ca-secret"
 )
 
-var clusters = []string{"cluster1", "cluster2"}
+type trackedResource struct {
+	cluster string
+	c       client.Client
+	obj     client.Object
+}
+
+func (r trackedResource) Key() string {
+	kind := reflect.TypeOf(r.obj).Elem().Name()
+	return fmt.Sprintf("%s %s on %s", kind, client.ObjectKeyFromObject(r.obj), r.cluster)
+}
+
+var _ = Describe("Addon registration", func() {
+	It("should have ClusterManagementAddOn registered", func(ctx SpecContext) {
+		cmao := &addonv1beta1.ClusterManagementAddOn{}
+		err := hubClient.Get(ctx, key.Of("multicluster-mesh-addon"), cmao)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cmao.Spec.AddOnMeta.DisplayName).To(Equal("Multi-Cluster Mesh Add-on"))
+		Expect(cmao.Spec.AddOnMeta.Description).To(Equal("Hub-side controller for orchestrating multi-cluster Istio service mesh deployments"))
+		Expect(cmao.Spec.InstallStrategy.Type).To(Equal(addonv1beta1.AddonInstallStrategyManual))
+	})
+})
 
 var _ = Describe("Controller health", func() {
 	It("should have the controller deployment available", func(ctx SpecContext) {
@@ -44,9 +76,15 @@ var _ = Describe("Controller health", func() {
 
 var _ = Describe("MultiClusterMesh lifecycle", Ordered, func() {
 	var (
-		mesh *meshv1alpha1.MultiClusterMesh
-		ns   string
+		mesh    *meshv1alpha1.MultiClusterMesh
+		ns      string
+		created = map[string]trackedResource{}
 	)
+
+	track := func(cluster string, c client.Client, obj client.Object) {
+		r := trackedResource{cluster: cluster, c: c, obj: obj.DeepCopyObject().(client.Object)}
+		created[r.Key()] = r
+	}
 
 	BeforeAll(func(ctx SpecContext) {
 		ns = util.UniqueName("test-ns")
@@ -54,6 +92,17 @@ var _ = Describe("MultiClusterMesh lifecycle", Ordered, func() {
 	})
 
 	AfterAll(func(ctx SpecContext) {
+		collectArtifacts(ctx, "mesh-lifecycle",
+			[]string{ns},
+			[]string{testOperatorNamespace, "istio-system"},
+		)
+
+		// Do not leave behind any resources to be able to reuse the same env.
+		if mesh != nil {
+			Step("Deleting test mesh %s/%s", mesh.Namespace, mesh.Name)
+			_ = hubClient.Delete(ctx, mesh)
+		}
+
 		Step("Deleting test namespace %s", ns)
 		err := client.IgnoreNotFound(hubClient.Delete(ctx, &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: ns},
@@ -61,94 +110,188 @@ var _ = Describe("MultiClusterMesh lifecycle", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	BeforeEach(func(ctx SpecContext) {
+	It("should deploy the mesh", func(ctx SpecContext) {
 		Step("Creating test mesh")
-		mesh = util.CreateMultiClusterMesh(ctx, hubClient, util.UniqueName("test-mesh"), ns, "mesh-cluster-set")
+		mesh = util.CreateMultiClusterMesh(ctx, hubClient, util.UniqueName("test-mesh"), ns, "mesh-cluster-set",
+			meshv1alpha1.MultiClusterMeshSpec{
+				Operator: meshv1alpha1.OperatorConfig{
+					Name:            testOperatorName,
+					Namespace:       testOperatorNamespace,
+					Source:          testCatalogSource,
+					SourceNamespace: testCatalogNamespace,
+				},
+				Security: meshv1alpha1.SecurityConfig{
+					Trust: meshv1alpha1.TrustConfig{
+						CertManager: meshv1alpha1.CertManagerConfig{
+							IssuerRef: meshv1alpha1.IssuerReference{
+								Name: testIssuerName,
+								Kind: testIssuerKind,
+							},
+						},
+					},
+				},
+			})
 
-		Step("Waiting for controller to reconcile")
+		Step("Waiting for mesh to become ready")
 		Eventually(func(g Gomega) {
 			g.Expect(getMesh(ctx, mesh)).To(Succeed())
-			// TODO(mkolesni): Once feedback rules are implemented (#89), check for Status=True instead of just existence.
-			g.Expect(meta.FindStatusCondition(mesh.Status.Conditions, meshv1alpha1.ConditionReady)).NotTo(BeNil())
+			g.Expect(meta.IsStatusConditionTrue(mesh.Status.Conditions, meshv1alpha1.ConditionReady)).To(BeTrue())
 		}).Should(Succeed())
 	})
 
-	AfterEach(func(ctx SpecContext) {
-		Step("Deleting test mesh %s", mesh.Name)
-		err := client.IgnoreNotFound(hubClient.Delete(ctx, mesh))
-		Expect(err).NotTo(HaveOccurred())
-
-		Step("Waiting for ManifestWorks to be cleaned up")
-		Eventually(func(g Gomega) {
-			mwList := &workv1.ManifestWorkList{}
-			err := hubClient.List(ctx, mwList, client.MatchingLabels{meshcontroller.ManagedByLabel: meshcontroller.ManagedByValue})
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(mwList.Items).To(BeEmpty(), "ManifestWorks still exist")
-		}).Should(Succeed())
-	})
-
-	// TODO(mkolesni): Once feedback rules are implemented (#89), replace MW/spoke checks
-	// with mesh status assertions (ConditionOperatorInstalled=True per cluster).
-	It("creates operator resources on spoke clusters", func(ctx SpecContext) {
+	It("should deploy operator resources to spoke clusters", func(ctx SpecContext) {
 		for cluster, spokeClient := range spokeClients {
-			Step("Verifying ManifestWork is Available on hub for %s", cluster)
+			Step("Verifying OperatorInstalled condition for %s", cluster)
+			cs := findClusterStatus(mesh, cluster)
+			Expect(cs).NotTo(BeNil(), "missing cluster status for %s", cluster)
+			Expect(meta.IsStatusConditionTrue(cs.Conditions, meshv1alpha1.ConditionOperatorInstalled)).To(BeTrue(),
+				"expected OperatorInstalled=True for %s", cluster)
+
+			Step("Verifying control plane namespace exists on %s", cluster)
+			cpns := &corev1.Namespace{}
 			Eventually(func(g Gomega) {
-				mw, err := getOperatorMW(ctx, cluster)
-				g.Expect(err).NotTo(HaveOccurred())
-				available := meta.FindStatusCondition(mw.Status.Conditions, string(workv1.WorkAvailable))
-				g.Expect(available).NotTo(BeNil())
-				g.Expect(available.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(spokeClient.Get(ctx, key.Of("istio-system"), cpns)).To(Succeed())
+				g.Expect(cpns.Labels[meshcontroller.IstioNetworkLabel]).To(Equal(cluster))
 			}).Should(Succeed())
+			track(cluster, spokeClient, cpns)
 
 			Step("Verifying operator namespace exists on %s", cluster)
-			err := spokeClient.Get(ctx, key.Of(meshcontroller.DefaultOperatorNs), &corev1.Namespace{})
-			Expect(err).NotTo(HaveOccurred())
+			ns := &corev1.Namespace{}
+			Expect(spokeClient.Get(ctx, key.Of(testOperatorNamespace), ns)).To(Succeed())
+			track(cluster, spokeClient, ns)
 
 			Step("Verifying OperatorGroup exists on %s", cluster)
 			ogList := &operatorsv1.OperatorGroupList{}
-			err = spokeClient.List(ctx, ogList, client.InNamespace(meshcontroller.DefaultOperatorNs))
+			err := spokeClient.List(ctx, ogList, client.InNamespace(testOperatorNamespace))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ogList.Items).To(HaveLen(1))
 
 			Step("Verifying Subscription content on %s", cluster)
 			sub, err := getSubscription(ctx, spokeClient)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(sub.Spec.Package).To(Equal(meshcontroller.OperatorNameSail))
-			Expect(sub.Spec.Channel).To(Equal(meshcontroller.DefaultChannel))
-			Expect(sub.Spec.CatalogSource).To(Equal(meshcontroller.DefaultCatalogSource))
+			Expect(sub.Spec.Package).To(Equal(testOperatorName))
+			Expect(sub.Spec.Channel).To(Equal(testDefaultChannel))
+			Expect(sub.Spec.CatalogSource).To(Equal(testCatalogSource))
+			Expect(sub.Spec.CatalogSourceNamespace).To(Equal(testCatalogNamespace))
 		}
 	})
 
-	It("updates spoke resources when operator config changes", func(ctx SpecContext) {
+	It("should update spoke resources when operator config changes", func(ctx SpecContext) {
 		Step("Updating mesh operator channel")
 		Expect(getMesh(ctx, mesh)).To(Succeed())
 		mesh.Spec.Operator.Channel = "candidate"
 		Expect(hubClient.Update(ctx, mesh)).To(Succeed())
 
-		Step("Verifying Subscription channel is updated on spoke clusters")
 		for cluster, spokeClient := range spokeClients {
+			Step("Verifying Subscription channel is updated on %s", cluster)
 			Eventually(func(g Gomega) {
-				g.Expect(getSubscription(ctx, spokeClient)).To(HaveField("Spec.Channel", "candidate"),
-					"expected Subscription channel on %s to be updated", cluster)
+				g.Expect(getSubscription(ctx, spokeClient)).To(HaveField("Spec.Channel", "candidate"))
 			}).Should(Succeed())
 		}
 	})
 
-	It("cleans up resources on mesh deletion", func(ctx SpecContext) {
+	It("should distribute cacerts secrets to spoke clusters", func(ctx SpecContext) {
+		cpNamespace := mesh.GetControlPlaneNamespace()
+
+		// The root CA is expected to be pre-created by setup-test-issuer before the test run.
+		Step("Fetching hub root CA certificate")
+		rootCASecret := &corev1.Secret{}
+		Expect(hubClient.Get(ctx, key.Of(testIssuerSecretName, "cert-manager"), rootCASecret)).To(Succeed())
+		hubRootCert := rootCASecret.Data["tls.crt"]
+		Expect(hubRootCert).NotTo(BeEmpty())
+
+		rootPool := x509.NewCertPool()
+		Expect(rootPool.AppendCertsFromPEM(hubRootCert)).To(BeTrue(), "failed to parse hub root CA")
+
+		for cluster, spokeClient := range spokeClients {
+			Step("Verifying cacerts secret on %s", cluster)
+			secret := &corev1.Secret{}
+			Eventually(func(g Gomega) {
+				g.Expect(spokeClient.Get(ctx, key.Of(meshcontroller.CacertsSecretName, cpNamespace), secret)).To(Succeed())
+				g.Expect(secret.Type).To(Equal(corev1.SecretTypeTLS))
+				g.Expect(secret.Data["tls.crt"]).NotTo(BeEmpty(), "tls.crt")
+				g.Expect(secret.Data["tls.key"]).NotTo(BeEmpty(), "tls.key")
+				g.Expect(secret.Data["ca.crt"]).To(Equal(hubRootCert), "ca.crt vs hub root CA")
+			}).WithTimeout(2 * time.Minute).Should(Succeed())
+			track(cluster, spokeClient, secret)
+
+			Step("Verifying certificate chain and subject on %s", cluster)
+			block, _ := pem.Decode(secret.Data["tls.crt"])
+			Expect(block).NotTo(BeNil(), "failed to decode tls.crt PEM")
+			cert, err := x509.ParseCertificate(block.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(cert.IsCA).To(BeTrue())
+			Expect(cert.Subject.CommonName).To(Equal("Istio CA"))
+			Expect(cert.Subject.Organization).To(ConsistOf(mesh.GetTrustDomain()))
+			Expect(cert.Subject.OrganizationalUnit).To(ConsistOf(cluster))
+
+			_, err = cert.Verify(x509.VerifyOptions{Roots: rootPool})
+			Expect(err).NotTo(HaveOccurred(), "intermediate CA not signed by hub root CA")
+		}
+	})
+
+	It("should create service accounts and token secrets for each spoke cluster", func(ctx SpecContext) {
+		for cluster, spokeClient := range spokeClients {
+			Step("Verifying service account and token secret for %s", cluster)
+			Eventually(func(g Gomega) {
+				msaList := listMeshMSAs(g, ctx, mesh, client.InNamespace(cluster))
+				g.Expect(msaList.Items).To(HaveLen(1),
+					"expected exactly one MSA for cluster %s", cluster)
+
+				msa := msaList.Items[0]
+				sa := &corev1.ServiceAccount{}
+				g.Expect(spokeClient.Get(ctx, key.Of(msa.Name, msaSpokeNamespace), sa)).To(Succeed(),
+					"ServiceAccount %s/%s should exist on spoke %s", msaSpokeNamespace, msa.Name, cluster)
+				track(cluster, spokeClient, sa)
+
+				g.Expect(msa.Status.TokenSecretRef).NotTo(BeNil(),
+					"expected MSA %s/%s to have tokenSecretRef", msa.Namespace, msa.Name)
+
+				secret := &corev1.Secret{}
+				g.Expect(hubClient.Get(ctx, key.Of(msa.Status.TokenSecretRef.Name, cluster), secret)).To(Succeed(),
+					"token secret %s/%s should exist on hub", cluster, msa.Status.TokenSecretRef.Name)
+				track(cluster, hubClient, secret)
+			}).Should(Succeed())
+		}
+	})
+
+	It("should create istio-reader ClusterRole and ClusterRoleBinding on each spoke cluster", func(ctx SpecContext) {
+		for cluster, spokeClient := range spokeClients {
+			Step("Verifying istio-reader RBAC for %s", cluster)
+			Eventually(func(g Gomega) {
+				msaList := listMeshMSAs(g, ctx, mesh, client.InNamespace(cluster))
+				g.Expect(msaList.Items).To(HaveLen(1),
+					"expected exactly one MSA for cluster %s", cluster)
+				rbacName := meshcontroller.IstioReaderName(mesh)
+
+				cr := &rbacv1.ClusterRole{}
+				g.Expect(spokeClient.Get(ctx, key.Of(rbacName), cr)).To(Succeed(),
+					"ClusterRole %s should exist on spoke %s", rbacName, cluster)
+				g.Expect(cr.Rules).NotTo(BeEmpty())
+				track(cluster, spokeClient, cr)
+
+				crb := &rbacv1.ClusterRoleBinding{}
+				g.Expect(spokeClient.Get(ctx, key.Of(rbacName), crb)).To(Succeed(),
+					"ClusterRoleBinding %s should exist on spoke %s", rbacName, cluster)
+				g.Expect(crb.RoleRef.Kind).To(Equal("ClusterRole"))
+				g.Expect(crb.RoleRef.Name).To(Equal(rbacName))
+				g.Expect(crb.Subjects).To(HaveLen(1))
+				g.Expect(crb.Subjects[0].Kind).To(Equal("ServiceAccount"))
+				g.Expect(crb.Subjects[0].Name).To(Equal(msaList.Items[0].Name))
+				g.Expect(crb.Subjects[0].Namespace).To(Equal(msaSpokeNamespace))
+				track(cluster, spokeClient, crb)
+			}).Should(Succeed())
+		}
+	})
+
+	It("should remove spoke resources when mesh is deleted", func(ctx SpecContext) {
 		Step("Deleting the mesh CR")
 		util.DeleteResource(ctx, hubClient, mesh, mesh.Name, mesh.Namespace)
 
-		Step("Verifying ManifestWorks are removed from hub")
-		for _, cluster := range clusters {
-			util.ExpectResourceDeleted(ctx, hubClient, &workv1.ManifestWork{}, meshcontroller.OperatorManifestWorkName, cluster)
-		}
-
-		Step("Verifying Subscriptions are removed from spoke clusters")
-		for _, spokeClient := range spokeClients {
-			// Spoke-side cleanup depends on the OCM work agent processing the
-			// ManifestWork deletion and OLM processing any Subscription finalizers,
-			// which can take longer than the default timeout in CI.
-			util.ExpectResourceDeleted(ctx, spokeClient, &operatorsv1alpha1.Subscription{}, meshcontroller.OperatorNameSail, meshcontroller.DefaultOperatorNs, 2*time.Minute)
+		for label, r := range created {
+			Step("Verifying %s is removed", label)
+			util.ExpectResourceDeleted(ctx, r.c, r.obj, r.obj.GetName(), r.obj.GetNamespace(), 2*time.Minute)
 		}
 	})
 })
@@ -157,14 +300,27 @@ func getMesh(ctx context.Context, mesh *meshv1alpha1.MultiClusterMesh) error {
 	return hubClient.Get(ctx, key.For(mesh), mesh)
 }
 
-func getOperatorMW(ctx context.Context, cluster string) (*workv1.ManifestWork, error) {
-	mw := &workv1.ManifestWork{}
-	err := hubClient.Get(ctx, key.Of(meshcontroller.OperatorManifestWorkName, cluster), mw)
-	return mw, err
+func findClusterStatus(mesh *meshv1alpha1.MultiClusterMesh, clusterName string) *meshv1alpha1.ClusterMeshStatus {
+	for _, cs := range mesh.Status.ClusterStatus {
+		if cs.ClusterName == clusterName {
+			return &cs
+		}
+	}
+	return nil
 }
 
 func getSubscription(ctx context.Context, spokeClient client.Client) (*operatorsv1alpha1.Subscription, error) {
 	sub := &operatorsv1alpha1.Subscription{}
-	err := spokeClient.Get(ctx, key.Of(meshcontroller.OperatorNameSail, meshcontroller.DefaultOperatorNs), sub)
+	err := spokeClient.Get(ctx, key.Of(testOperatorName, testOperatorNamespace), sub)
 	return sub, err
+}
+
+func listMeshMSAs(g Gomega, ctx context.Context, mesh *meshv1alpha1.MultiClusterMesh, opts ...client.ListOption) *msav1beta1.ManagedServiceAccountList {
+	msaList := &msav1beta1.ManagedServiceAccountList{}
+	listOpts := append([]client.ListOption{client.MatchingLabels{
+		meshcontroller.MeshNameLabel:      mesh.Name,
+		meshcontroller.MeshNamespaceLabel: mesh.Namespace,
+	}}, opts...)
+	g.Expect(hubClient.List(ctx, msaList, listOpts...)).To(Succeed())
+	return msaList
 }

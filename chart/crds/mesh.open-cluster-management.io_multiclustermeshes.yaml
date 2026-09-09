@@ -14,7 +14,24 @@ spec:
     singular: multiclustermesh
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .spec.clusterSet
+      name: ClusterSet
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Message
+      priority: 1
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: MultiClusterMesh represents a multi-cluster service mesh configuration
@@ -54,12 +71,18 @@ spec:
                 properties:
                   namespace:
                     default: istio-system
-                    description: Namespace is the namespace where Istio will be installed
-                      on each cluster
+                    description: |-
+                      Namespace is the namespace where Istio will be installed on each cluster.
+                      This namespace is created and deleted by the addon as part of the mesh lifecycle.
+                    maxLength: 63
                     type: string
+                    x-kubernetes-validations:
+                    - message: spec.controlPlane.namespace is immutable
+                      rule: self == oldSelf
                 type: object
               operator:
-                description: Operator defines the Sail Operator installation configuration
+                description: Operator defines the service mesh operator installation
+                  configuration
                 properties:
                   channel:
                     default: stable
@@ -74,20 +97,31 @@ spec:
                     - Automatic
                     - Manual
                     type: string
-                  namespace:
-                    description: |-
-                      Namespace is the namespace where the Sail Operator will be installed
-                      Defaults to "openshift-operators" on OpenShift, "sail-operator" on vanilla Kubernetes
+                  name:
+                    default: servicemeshoperator3
+                    description: Name is the OLM package name of the operator
                     type: string
-                  source:
+                  namespace:
+                    default: multicluster-mesh-operator
                     description: |-
-                      Source is the CatalogSource name
-                      Defaults to "redhat-operators" on OpenShift, "operatorhubio-catalog" on vanilla Kubernetes
+                      Namespace is the namespace where the operator will be installed.
+                      This namespace may be deleted when the mesh is removed, so avoid
+                      using a namespace that contains other resources.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: namespace must not use the reserved 'openshift-' prefix
+                      rule: '!self.startsWith(''openshift-'')'
+                    - message: namespace must not use the reserved 'kube-' prefix
+                      rule: '!self.startsWith(''kube-'')'
+                    - message: namespace must not be 'default'
+                      rule: self != 'default'
+                  source:
+                    default: redhat-operators
+                    description: Source is the CatalogSource name
                     type: string
                   sourceNamespace:
-                    description: |-
-                      SourceNamespace is the namespace of the CatalogSource
-                      Defaults to "openshift-marketplace" on OpenShift, "olm" on vanilla Kubernetes
+                    default: openshift-marketplace
+                    description: SourceNamespace is the namespace of the CatalogSource
                     type: string
                   startingCSV:
                     description: |-

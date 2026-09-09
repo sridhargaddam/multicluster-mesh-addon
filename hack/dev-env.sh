@@ -2,8 +2,10 @@
 # Provisions and manages a local 3-cluster Kind/OCM development environment.
 # This file is invoked by Makefile targets with an action argument.
 #
-# Usage: hack/dev-env.sh <action>
-# Actions: create-clusters, install-olm, install-cert-manager, install-managed-serviceaccount, init-ocm, join-clusters, setup-mesh, clean
+# Usage: hack/dev-env.sh <action> [args...]
+# Actions: check-host, create-cluster <name>, install-olm <name>, install-cert-manager,
+#          install-managed-serviceaccount, init-ocm, join-clusters, setup-mesh,
+#          setup-test-issuer
 
 set -euo pipefail
 
@@ -98,73 +100,64 @@ require_clusters() {
     done
 }
 
-create_clusters() {
+check_host() {
     check_inotify_limits
     check_kernel_keyring_limits
-    mkdir -p "${DEV_KUBE_DIR}"
 
-    local existing_clusters
-    existing_clusters="$(${KIND} get clusters 2>/dev/null || true)"
+    local existing
+    existing="$(${KIND} get clusters 2>/dev/null || true)"
     local found=()
     for cluster in "${HUB}" "${CLUSTER1}" "${CLUSTER2}"; do
-        if echo "${existing_clusters}" | grep -qx "${cluster}"; then
+        if echo "${existing}" | grep -qx "${cluster}"; then
             found+=("${cluster}")
         fi
     done
-
     if [[ ${#found[@]} -gt 0 ]]; then
         err "Kind clusters already exist: ${found[*]}. Run 'make dev-clean' to tear them down first."
     fi
+}
 
-    local kind_node_image="kindest/node:${K8S_VERSION}"
+create_cluster() {
+    local cluster="${1}"
+    mkdir -p "${DEV_KUBE_DIR}"
 
-    for cluster in "${HUB}" "${CLUSTER1}" "${CLUSTER2}"; do
-        log "Creating Kind cluster: ${cluster}"
-        on "${cluster}" "${KIND}" create cluster \
-            --name "${cluster}" \
-            --image "${kind_node_image}" \
-            --wait 120s
+    log "Creating Kind cluster: ${cluster}"
+    on "${cluster}" "${KIND}" create cluster \
+        --name "${cluster}" \
+        --image "kindest/node:${K8S_VERSION}" \
+        --wait 120s
 
-        log "Waiting for cluster ${cluster} API to be ready..."
-        on "${cluster}" kubectl wait --for=condition=Ready nodes --all --timeout=120s
-    done
-
-    log "All clusters created successfully"
-    ${KIND} get clusters
+    log "Waiting for cluster ${cluster} API to be ready..."
+    on "${cluster}" kubectl wait --for=condition=Ready nodes --all --timeout=120s
+    log "Cluster ${cluster} ready"
 }
 
 install_olm() {
-    require_clusters "${CLUSTER1}" "${CLUSTER2}"
+    local cluster="${1}"
+    require_clusters "${cluster}"
     local olm_base_url="https://github.com/operator-framework/operator-lifecycle-manager/releases/download/${OLM_VERSION}"
 
-    for cluster in "${CLUSTER1}" "${CLUSTER2}"; do
-        if on "${cluster}" kubectl get deployment olm-operator -n olm &>/dev/null; then
-            log "OLM already installed on ${cluster}, skipping"
-            continue
-        fi
+    if on "${cluster}" kubectl get deployment olm-operator -n olm &>/dev/null; then
+        log "OLM already installed on ${cluster}, skipping"
+        return
+    fi
 
-        log "Installing OLM ${OLM_VERSION} on ${cluster}..."
+    log "Installing OLM ${OLM_VERSION} on ${cluster}..."
 
-        on "${cluster}" kubectl apply --server-side -f "${olm_base_url}/crds.yaml"
-        on "${cluster}" retry kubectl wait --for=condition=Established \
-            crd/catalogsources.operators.coreos.com \
-            crd/subscriptions.operators.coreos.com \
-            --timeout=60s
+    on "${cluster}" kubectl apply --server-side -f "${olm_base_url}/crds.yaml"
+    on "${cluster}" retry kubectl wait --for=condition=Established \
+        crd/catalogsources.operators.coreos.com \
+        crd/subscriptions.operators.coreos.com \
+        --timeout=60s
 
-        log "Applying OLM components on ${cluster}..."
-        on "${cluster}" kubectl apply -f "${olm_base_url}/olm.yaml"
+    log "Applying OLM components on ${cluster}..."
+    on "${cluster}" kubectl apply -f "${olm_base_url}/olm.yaml"
 
-        log "Waiting for OLM components to be ready on ${cluster}..."
-        on "${cluster}" kubectl rollout status deployment/olm-operator -n olm --timeout=180s
-        on "${cluster}" kubectl rollout status deployment/catalog-operator -n olm --timeout=180s
+    log "Waiting for OLM components to be ready on ${cluster}..."
+    on "${cluster}" kubectl rollout status deployment/olm-operator -n olm --timeout=180s
+    on "${cluster}" kubectl rollout status deployment/catalog-operator -n olm --timeout=180s
 
-        log "OLM ${OLM_VERSION} installed on ${cluster}"
-    done
-
-    for cluster in "${CLUSTER1}" "${CLUSTER2}"; do
-        log "Granting klusterlet-work-sa OLM permissions on ${cluster}"
-        on "${cluster}" kubectl apply -f "${SCRIPT_DIR}/hack/kind/klusterlet-work-olm.yaml"
-    done
+    log "OLM ${OLM_VERSION} installed on ${cluster}"
 }
 
 install_cert_manager() {
@@ -185,10 +178,38 @@ install_cert_manager() {
     log "cert-manager ${CERT_MANAGER_VERSION} installed on hub"
 }
 
+setup_test_issuer() {
+    if on "${HUB}" kubectl get clusterissuer mesh-test-root-ca &>/dev/null; then
+        log "Test ClusterIssuer already exists, skipping"
+        return
+    fi
+
+    log "Waiting for cert-manager-cainjector to be ready..."
+    on "${HUB}" kubectl rollout status deployment/cert-manager-cainjector \
+        -n cert-manager --timeout=120s
+
+    log "Creating test ClusterIssuer trust chain"
+    on "${HUB}" kubectl apply -f "${SCRIPT_DIR}/hack/kind/cert-manager-test-issuer.yaml"
+
+    log "Waiting for bootstrap ClusterIssuer to be ready..."
+    on "${HUB}" retry kubectl wait clusterissuer/mesh-test-selfsigned \
+        --for=condition=Ready --timeout=60s
+
+    log "Waiting for test root CA Certificate to be issued..."
+    on "${HUB}" retry kubectl wait certificate/mesh-test-root-ca \
+        -n cert-manager --for=condition=Ready --timeout=120s
+
+    log "Waiting for CA-backed ClusterIssuer to be ready..."
+    on "${HUB}" retry kubectl wait clusterissuer/mesh-test-root-ca \
+        --for=condition=Ready --timeout=60s
+
+    log "Test ClusterIssuer trust chain ready"
+}
+
 init_ocm() {
     require_clusters "${HUB}"
     log "Initializing OCM hub on cluster: ${HUB}"
-    on "${HUB}" "${CLUSTERADM}" init --wait
+    on "${HUB}" "${CLUSTERADM}" init --feature-gates=ManifestWorkReplicaSet=true --wait
 
     log "Waiting for OCM hub components to be ready..."
     on "${HUB}" retry kubectl wait --for=condition=Available \
@@ -246,23 +267,6 @@ join_clusters() {
     on "${HUB}" "${CLUSTERADM}" create clusterset mesh-cluster-set
     on "${HUB}" "${CLUSTERADM}" clusterset set mesh-cluster-set --clusters "${CLUSTER1},${CLUSTER2}"
 
-    # On OpenShift, the product ClusterClaim is created automatically by the
-    # klusterlet agent. On vanilla Kind clusters there is no such agent,
-    # so we create it manually. The OCM registration agent syncs it to
-    # ManagedCluster.status.clusterClaims on the hub, which the addon controller
-    # uses for platform detection.
-    for cluster in "${CLUSTER1}" "${CLUSTER2}"; do
-        log "Creating product ClusterClaim on ${cluster}"
-        on "${cluster}" kubectl apply -f "${SCRIPT_DIR}/hack/kind/product-clusterclaim.yaml"
-    done
-
-    for cluster in "${CLUSTER1}" "${CLUSTER2}"; do
-        log "Waiting for product claim on ${cluster} to propagate to the hub..."
-        on "${HUB}" retry kubectl wait managedcluster/"${cluster}" \
-            --for='jsonpath={.status.clusterClaims[?(@.name=="product.open-cluster-management.io")].value}=Kind' \
-            --timeout=60s
-    done
-
     log "OCM topology ready"
     on "${HUB}" kubectl get managedclusters
     on "${HUB}" kubectl get managedclustersets
@@ -291,6 +295,85 @@ install_managed_serviceaccount() {
 
     log "managed-serviceaccount addon installed on hub"
     on "${HUB}" kubectl get managedclusteraddon -A
+}
+
+install_metallb() {
+    local cluster="${1}"
+    require_clusters "${cluster}"
+    local metallb_version="${METALLB_VERSION}"
+
+    if on "${cluster}" kubectl get deployment controller -n metallb-system &>/dev/null; then
+        log "MetalLB already installed on ${cluster}, skipping"
+        return
+    fi
+
+    # Kind auto-detects its container provider (docker or podman), which may
+    # differ from CONTAINER_ENGINE. Detect the actual provider by checking
+    # which runtime owns the Kind node containers.
+    local kind_provider="docker"
+    if podman inspect "${cluster}-control-plane" &>/dev/null; then
+        kind_provider="podman"
+    fi
+
+    local kind_subnet
+    case "${kind_provider}" in
+        podman)
+            # Select the IPv4 subnet; Kind networks may be dual-stack and index 0 is not guaranteed IPv4.
+            kind_subnet="$(podman network inspect kind -f '{{range .Subnets}}{{.Subnet}}{{"\n"}}{{end}}' | grep -v ':' | head -1)" \
+                || err "Failed to inspect Kind network with Podman" ;;
+        docker)
+            # Select the IPv4 subnet; Kind networks may be dual-stack and index 0 is not guaranteed IPv4.
+            kind_subnet="$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' | grep -v ':' | head -1)" \
+                || err "Failed to inspect Kind network with Docker" ;;
+    esac
+
+    local base_prefix
+    base_prefix="$(echo "${kind_subnet}" | cut -d'/' -f1 | cut -d'.' -f1-3)"
+
+    local idx
+    case "${cluster}" in
+        "${CLUSTER1}") idx=0 ;;
+        "${CLUSTER2}") idx=1 ;;
+        *) err "Unknown cluster for MetalLB IP assignment: ${cluster}" ;;
+    esac
+    local range_start="${base_prefix}.$((200 + idx * 10 + 1))"
+    local range_end="${base_prefix}.$((200 + idx * 10 + 10))"
+
+    log "Installing MetalLB ${metallb_version} on ${cluster}..."
+    on "${cluster}" kubectl apply -f \
+        "https://raw.githubusercontent.com/metallb/metallb/${metallb_version}/config/manifests/metallb-native.yaml"
+
+    log "Waiting for MetalLB controller to be ready on ${cluster}..."
+    on "${cluster}" kubectl rollout status deployment/controller -n metallb-system --timeout=120s
+
+    log "Waiting for MetalLB speaker to be ready on ${cluster}..."
+    on "${cluster}" kubectl rollout status daemonset/speaker -n metallb-system --timeout=120s
+
+    log "Configuring MetalLB IP pool ${range_start}-${range_end} on ${cluster}..."
+    sed "s|__ADDRESS_RANGE__|${range_start}-${range_end}|" \
+        "${SCRIPT_DIR}/hack/kind/metallb-pool.yaml" \
+        | on "${cluster}" kubectl apply -f -
+    log "MetalLB configured on ${cluster}"
+}
+
+install_gateway_api() {
+    local cluster="${1}"
+    require_clusters "${cluster}"
+    local gw_api_version="${GATEWAY_API_VERSION}"
+
+    if on "${cluster}" kubectl get crd gateways.gateway.networking.k8s.io &>/dev/null; then
+        log "Gateway API CRDs already installed on ${cluster}, skipping"
+        return
+    fi
+
+    log "Installing Gateway API CRDs ${gw_api_version} on ${cluster}..."
+    on "${cluster}" kubectl apply --server-side -f \
+        "https://github.com/kubernetes-sigs/gateway-api/releases/download/${gw_api_version}/standard-install.yaml"
+
+    on "${cluster}" retry kubectl wait --for=condition=Established \
+        crd/gateways.gateway.networking.k8s.io --timeout=60s
+
+    log "Gateway API CRDs installed on ${cluster}"
 }
 
 setup_mesh() {
@@ -328,31 +411,19 @@ setup_mesh() {
     log "Monitor progress: $(on "${HUB}" echo kubectl get multiclustermesh -n mesh-system)"
 }
 
-clean() {
-    log "Deleting Kind clusters..."
-    for cluster in "${HUB}" "${CLUSTER1}" "${CLUSTER2}"; do
-        if ${KIND} get clusters 2>/dev/null | grep -qx "${cluster}"; then
-            log "Deleting cluster: ${cluster}"
-            ${KIND} delete cluster --name "${cluster}" || true
-        fi
-    done
-
-    log "Removing dev environment state..."
-    rm -rf "${DEV_KUBE_DIR}"
-
-    log "Clean complete"
-}
-
 ACTION="${1:-}"
 case "${ACTION}" in
-    create-clusters)                 create_clusters ;;
-    install-olm)                     install_olm ;;
+    check-host)                      check_host ;;
+    create-cluster)                  create_cluster "${2}" ;;
+    install-olm)                     install_olm "${2}" ;;
     install-cert-manager)            install_cert_manager ;;
     install-managed-serviceaccount)  install_managed_serviceaccount ;;
     init-ocm)                        init_ocm ;;
     join-clusters)                   join_clusters ;;
     setup-mesh)                      setup_mesh ;;
-    clean)                           clean ;;
+    install-metallb)                 install_metallb "${2}" ;;
+    install-gateway-api)             install_gateway_api "${2}" ;;
+    setup-test-issuer)               setup_test_issuer ;;
     *)
-        err "Unknown action: '${ACTION}'. Valid: create-clusters, install-olm, install-cert-manager, install-managed-serviceaccount, init-ocm, join-clusters, setup-mesh, clean" ;;
+        err "Unknown action: '${ACTION}'. Valid: check-host, create-cluster, install-olm, install-cert-manager, install-managed-serviceaccount, init-ocm, join-clusters, setup-mesh, install-metallb, install-gateway-api, setup-test-issuer" ;;
 esac

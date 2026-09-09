@@ -16,10 +16,19 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
-// upstreamIstioReaderTemplatesURL points at the Istio Helm chart templates that
-// pkg/hub/mesh/manifests/istio-reader-clusterrole.yaml and
-// pkg/hub/mesh/manifests/istio-reader-clusterrolebinding.yaml are copied from.
-// See https://github.com/stolostron/multicluster-mesh-addon/issues/259.
+// embeddedIstioReaderClusterRolePath and embeddedIstioReaderClusterRoleBindingPath are
+// the addon copies of Istio's reader RBAC Helm chart templates.
+const (
+	embeddedIstioReaderClusterRolePath        = "pkg/hub/mesh/manifests/istio-reader-clusterrole.yaml"
+	embeddedIstioReaderClusterRoleBindingPath = "pkg/hub/mesh/manifests/istio-reader-clusterrolebinding.yaml"
+)
+
+// upstreamIstioReaderClusterRoleTemplate is the upstream Istio Helm chart template path
+// for the embedded ClusterRole manifest.
+const upstreamIstioReaderClusterRoleTemplate = "manifests/charts/istio-control/istio-discovery/templates/reader-clusterrole.yaml"
+
+// upstreamIstioReaderTemplatesURL points at the Istio Helm chart templates the embedded
+// manifests are copied from. See https://github.com/stolostron/multicluster-mesh-addon/issues/259.
 const upstreamIstioReaderTemplatesURL = "https://raw.githubusercontent.com/istio/istio/%s/manifests/charts/istio-control/istio-discovery/templates/%s"
 
 // upstreamMCSAPIGroup is Istio's default for $mcsAPIGroup (env.MCS_API_GROUP), used
@@ -66,15 +75,15 @@ func TestIstioReaderRBACMatchesUpstream(t *testing.T) {
 	gotRules := normalizeRules(baseClusterRole.Rules)
 
 	if diff := cmp.Diff(wantRules, gotRules); diff != "" {
-		t.Errorf("pkg/hub/mesh/manifests/istio-reader-clusterrole.yaml has drifted from upstream Istio "+
-			"(ref %s, https://github.com/istio/istio/blob/%s/manifests/charts/istio-control/istio-discovery/templates/reader-clusterrole.yaml).\n"+
-			"Update the embedded ClusterRole to match upstream. Diff (-upstream +addon):\n%s", ref, ref, diff)
+		t.Errorf("%s has drifted from upstream Istio (ref %s, https://github.com/istio/istio/blob/%s/%s).\n"+
+			"Update the embedded ClusterRole to match upstream. Diff (-upstream +addon):\n%s",
+			embeddedIstioReaderClusterRolePath, ref, ref, upstreamIstioReaderClusterRoleTemplate, diff)
 	}
 
 	if baseClusterRoleBinding.RoleRef.APIGroup != upstreamClusterRoleBinding.RoleRef.APIGroup ||
 		baseClusterRoleBinding.RoleRef.Kind != upstreamClusterRoleBinding.RoleRef.Kind {
-		t.Errorf("pkg/hub/mesh/manifests/istio-reader-clusterrolebinding.yaml roleRef has drifted from "+
-			"upstream Istio (ref %s): got apiGroup=%q kind=%q, want apiGroup=%q kind=%q",
+		t.Errorf("%s roleRef has drifted from upstream Istio (ref %s): got apiGroup=%q kind=%q, want apiGroup=%q kind=%q",
+			embeddedIstioReaderClusterRoleBindingPath,
 			ref, baseClusterRoleBinding.RoleRef.APIGroup, baseClusterRoleBinding.RoleRef.Kind,
 			upstreamClusterRoleBinding.RoleRef.APIGroup, upstreamClusterRoleBinding.RoleRef.Kind)
 	}
@@ -88,8 +97,8 @@ func TestIstioReaderRBACMatchesUpstream(t *testing.T) {
 			len(baseClusterRoleBinding.Subjects))
 	}
 	if baseClusterRoleBinding.Subjects[0].Kind != upstreamClusterRoleBinding.Subjects[0].Kind {
-		t.Errorf("pkg/hub/mesh/manifests/istio-reader-clusterrolebinding.yaml subject kind has drifted "+
-			"from upstream Istio (ref %s): got %q, want %q",
+		t.Errorf("%s subject kind has drifted from upstream Istio (ref %s): got %q, want %q",
+			embeddedIstioReaderClusterRoleBindingPath,
 			ref, baseClusterRoleBinding.Subjects[0].Kind, upstreamClusterRoleBinding.Subjects[0].Kind)
 	}
 }
@@ -117,7 +126,7 @@ func fetchUpstreamClusterRoleBinding(t *testing.T, ref string) rbacv1.ClusterRol
 }
 
 // fetchIstioTemplate downloads a single Istio Helm chart template file, retrying a
-// couple of times on transient network errors.
+// couple of times on transient transport errors from client.Get.
 func fetchIstioTemplate(t *testing.T, ref, filename string) []byte {
 	t.Helper()
 	url := fmt.Sprintf(upstreamIstioReaderTemplatesURL, ref, filename)
@@ -125,38 +134,31 @@ func fetchIstioTemplate(t *testing.T, ref, filename string) []byte {
 	client := &http.Client{Timeout: 15 * time.Second}
 	const maxAttempts = 3
 
+	var resp *http.Response
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * time.Second)
 		}
 
-		body, err := doFetch(client, url)
-		if err == nil {
-			return body
+		resp, lastErr = client.Get(url)
+		if lastErr == nil {
+			break
 		}
-		lastErr = err
 	}
-
-	t.Fatalf("failed to fetch %s after %d attempts: %v", url, maxAttempts, lastErr)
-	return nil
-}
-
-func doFetch(client *http.Client, url string) ([]byte, error) {
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
+	if lastErr != nil {
+		t.Fatalf("failed to fetch %s after %d attempts: %v", url, maxAttempts, lastErr)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		t.Fatalf("failed to read response from %s: %v", url, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d fetching %s", resp.StatusCode, url)
+		t.Fatalf("unexpected status %d fetching %s", resp.StatusCode, url)
 	}
-	return body, nil
+	return body
 }
 
 // stripHelmTemplating converts an Istio Helm chart template into plain YAML that
@@ -188,19 +190,29 @@ func stripHelmTemplating(raw []byte) []byte {
 	return []byte(inlineTemplate.ReplaceAllString(text, ""))
 }
 
-// normalizeRules sorts each rule's APIGroups/Resources/Verbs, then sorts the rules
-// themselves, so that insignificant reordering (upstream vs. the addon's copy, or a
-// future upstream reshuffle) does not register as drift.
+// normalizeRules sorts each rule's permission fields, then sorts the rules themselves,
+// so that insignificant reordering (upstream vs. the addon's copy, or a future upstream
+// reshuffle) does not register as drift.
 func normalizeRules(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
 	out := make([]rbacv1.PolicyRule, len(rules))
 	for i, r := range rules {
-		apiGroups := append([]string{}, r.APIGroups...)
-		resources := append([]string{}, r.Resources...)
-		verbs := append([]string{}, r.Verbs...)
+		apiGroups := append([]string(nil), r.APIGroups...)
+		resources := append([]string(nil), r.Resources...)
+		verbs := append([]string(nil), r.Verbs...)
+		resourceNames := append([]string(nil), r.ResourceNames...)
+		nonResourceURLs := append([]string(nil), r.NonResourceURLs...)
 		sort.Strings(apiGroups)
 		sort.Strings(resources)
 		sort.Strings(verbs)
-		out[i] = rbacv1.PolicyRule{APIGroups: apiGroups, Resources: resources, Verbs: verbs}
+		sort.Strings(resourceNames)
+		sort.Strings(nonResourceURLs)
+		out[i] = rbacv1.PolicyRule{
+			APIGroups:       apiGroups,
+			Resources:       resources,
+			Verbs:           verbs,
+			ResourceNames:   resourceNames,
+			NonResourceURLs: nonResourceURLs,
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return ruleSortKey(out[i]) < ruleSortKey(out[j])
@@ -209,5 +221,9 @@ func normalizeRules(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
 }
 
 func ruleSortKey(r rbacv1.PolicyRule) string {
-	return strings.Join(r.APIGroups, ",") + "|" + strings.Join(r.Resources, ",") + "|" + strings.Join(r.Verbs, ",")
+	return strings.Join(r.APIGroups, ",") + "|" +
+		strings.Join(r.Resources, ",") + "|" +
+		strings.Join(r.Verbs, ",") + "|" +
+		strings.Join(r.ResourceNames, ",") + "|" +
+		strings.Join(r.NonResourceURLs, ",")
 }

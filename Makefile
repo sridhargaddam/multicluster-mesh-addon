@@ -72,10 +72,6 @@ ifeq ($(filter $(PLATFORM),$(VALID_PLATFORMS)),)
 $(error PLATFORM must be one of: $(VALID_PLATFORMS))
 endif
 
-# ISTIO_READER_REF is the istio/istio ref that verify-istio-reader-rbac diffs
-# pkg/hub/mesh/manifests/istio-reader-clusterrole.yaml against.
-ISTIO_READER_REF ?= master
-
 .PHONY: deps
 deps: go.mod go.sum
 	go mod tidy
@@ -135,8 +131,8 @@ verify-modules: ## Verify go modules are up to date
 
 .PHONY: verify-istio-reader-rbac
 verify-istio-reader-rbac: ## Verify istio-reader ClusterRole/ClusterRoleBinding match upstream Istio (requires network; set ISTIO_READER_SKIP=1 to skip)
-	@echo "Verifying istio-reader RBAC against upstream Istio ($(ISTIO_READER_REF))..."
-	ISTIO_READER_REF=$(ISTIO_READER_REF) go test ./pkg/hub/mesh/ -run '^TestIstioReaderRBACMatchesUpstream$$' -count=1 -timeout 2m
+	@echo "Verifying istio-reader RBAC against upstream Istio ($(or $(ISTIO_READER_REF),master))..."
+	@go test ./pkg/hub/mesh/ -run '^TestIstioReaderRBACMatchesUpstream$$' -count=1 -timeout 2m
 
 .PHONY: golangci-lint
 golangci-lint: ## Run golangci-lint

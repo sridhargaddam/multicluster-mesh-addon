@@ -200,7 +200,7 @@ The add-on defaults to OSSM (OpenShift Service Mesh) operator configuration. All
 
 Plumbing resources (ManifestWorks, ManagedServiceAccounts, Certificates) must use a deterministic naming strategy scoped to the owning mesh, so that multiple meshes on the same cluster don't collide. The operator ManifestWork is an exception - it is shared across meshes since the operator is a cluster-wide singleton.
 
-For a step-by-step guide with sample YAMLs, see [Multi-Tenancy Guide](multi-tenancy.md).
+For a step-by-step guide with sample YAMLs, see [Multi-Tenancy Guide](../multi-tenancy.md).
 
 ## Operator Lifecycle
 

@@ -12,15 +12,15 @@
 
 Multiple `MultiClusterMesh` resources can target the same [ManagedClusterSet], running independent meshes on the same pool of clusters. Isolation between meshes is achieved through:
 
-1. **Separate control plane namespaces** - Each mesh uses a separate control plane namespace on spoke clusters (users create the `Istio` CRs themselves; the add-on manages operator installation and mesh plumbing)
+1. **Separate control plane namespaces** - Each mesh uses a distinct `controlPlane.namespace` on spoke clusters. The add-on creates this namespace and installs the operator; users create and manage `Istio` CRs.
 2. **Namespace-scoped CRD** - `MultiClusterMesh` is namespace-scoped on the hub, enabling RBAC-based tenant boundaries
-3. **Per-mesh plumbing** - Each mesh gets its own trust domain, intermediate CA certificates, and discovery tokens
+3. **Per-mesh trust and discovery** - Each mesh gets its own trust domain, intermediate CA certificates, and discovery tokens
 
 The Sail/OSSM operator is a cluster-scoped singleton shared across meshes. The add-on installs it when the first mesh needs a cluster and removes it only when no mesh targets that cluster anymore.
 
 ## Shared Clusters, Separate Control Planes
 
-Multiple meshes on the same ClusterSet must use different `controlPlane.namespace` values. Each mesh operates independently (its certificates, discovery tokens, and trust domain are scoped to its own control plane namespace).
+Multiple meshes on the same ClusterSet must use different `controlPlane.namespace` values, and each value must differ from `spec.operator.namespace` (default: `multicluster-mesh-operator`). The add-on creates the control plane namespace on each spoke cluster. Each mesh operates independently (its certificates, discovery tokens, and trust domain are scoped to its own control plane namespace).
 
 ### Prerequisites
 
@@ -133,7 +133,7 @@ Repeat the `RoleBinding` for `mesh-team-b` with the appropriate subject.
 
 ## Data-Plane Isolation
 
-The add-on handles control-plane plumbing. Data-plane isolation between co-located meshes requires user-side configuration on each spoke cluster.
+Data-plane isolation between co-located meshes requires user-side configuration on each spoke cluster.
 
 > The following configuration is applied directly on each spoke cluster (not on the hub).
 
@@ -170,7 +170,9 @@ The controller validates all meshes targeting the same ClusterSet on every recon
 
 ### Namespace conflict
 
-Two meshes on the same ClusterSet cannot use the same `controlPlane.namespace`:
+A mesh cannot use the same namespace for its control plane and operator (`controlPlane.namespace` must differ from `spec.operator.namespace`).
+
+Two meshes on the same ClusterSet also cannot use the same `controlPlane.namespace`:
 
 ```yaml
 apiVersion: mesh.open-cluster-management.io/v1alpha1
@@ -203,7 +205,7 @@ status:
 
 ### Operator configuration conflict
 
-Meshes on the same ClusterSet must have compatible operator configurations (channel, source, namespace, etc.) since they share a single operator installation:
+Meshes on the same ClusterSet must have compatible `spec.operator` values since they share a single operator installation:
 
 ```yaml
 apiVersion: mesh.open-cluster-management.io/v1alpha1
@@ -240,8 +242,8 @@ status:
 
 | Conflict type | Resolution |
 |---------------|------------|
-| Namespace | Change the newer mesh's `controlPlane.namespace` to a unique value, or delete the older mesh |
-| Operator config | Align operator configuration across all meshes on the ClusterSet, or delete the older mesh |
+| Namespace | Use a unique `controlPlane.namespace` that differs from `spec.operator.namespace`, or delete the blocking mesh |
+| Operator config | Set identical `spec.operator` values across all meshes on the ClusterSet, or delete the blocking mesh |
 
 When the blocking mesh is deleted, the controller automatically unblocks and reconciles the previously-blocked mesh.
 

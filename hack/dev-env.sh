@@ -113,13 +113,24 @@ check_host() {
         fi
     done
     if [[ ${#found[@]} -gt 0 ]]; then
-        err "Kind clusters already exist: ${found[*]}. Run 'make dev-clean' to tear them down first."
+        log "Kind clusters already exist: ${found[*]}. Reusing existing clusters."
     fi
 }
 
 create_cluster() {
     local cluster="${1}"
     mkdir -p "${DEV_KUBE_DIR}"
+
+    local existing
+    existing="$(${KIND} get clusters 2>/dev/null || true)"
+    if echo "${existing}" | grep -qx "${cluster}"; then
+        log "Kind cluster ${cluster} already exists, skipping creation"
+        if [[ ! -f "${DEV_KUBE_DIR}/${cluster}.config" ]]; then
+            log "Exporting kubeconfig for existing cluster ${cluster}"
+            ${KIND} get kubeconfig --name "${cluster}" > "${DEV_KUBE_DIR}/${cluster}.config"
+        fi
+        return
+    fi
 
     log "Creating Kind cluster: ${cluster}"
     on "${cluster}" "${KIND}" create cluster \

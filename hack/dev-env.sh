@@ -103,18 +103,6 @@ require_clusters() {
 check_host() {
     check_inotify_limits
     check_kernel_keyring_limits
-
-    local existing
-    existing="$(${KIND} get clusters 2>/dev/null || true)"
-    local found=()
-    for cluster in "${HUB}" "${CLUSTER1}" "${CLUSTER2}"; do
-        if echo "${existing}" | grep -qx "${cluster}"; then
-            found+=("${cluster}")
-        fi
-    done
-    if [[ ${#found[@]} -gt 0 ]]; then
-        log "Kind clusters already exist: ${found[*]}. Reusing existing clusters."
-    fi
 }
 
 create_cluster() {
